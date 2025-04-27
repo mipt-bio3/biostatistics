@@ -1,0 +1,370 @@
+---
+title: "Биостатистика. ДЗ 2"
+author: "95-871"
+date: "2025-04-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(tibble.width = Inf) # displays all columns
+```
+
+# ДЗ №2
+
+## Загрузка пакетов и данных
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(broom)
+library(ROCR)
+library(mboost)
+library(powerSurvEpi)
+library(ggplot2)
+
+wbc <- read.csv("wisconsin_breast_cancer.csv")
+glimpse(wbc)
+wbc$X <- NULL
+
+# Преобразование diagnosis в бинарное представление
+wbc$diagnosis <- ifelse(wbc$diagnosis == "M", 1, 0)
+
+# Разделение данных на обучающую и тестовую выборки
+set.seed(42)  # Для воспроизводимости результата
+train_index <- sample(nrow(wbc), 0.8*nrow(wbc))
+wbc_train <- wbc[train_index, ]
+wbc_test <- wbc[-train_index, ]
+```
+
+## Задание 1
+
+Создайте регрессионную модель (или несколько моделей), которая описывала бы связь:
+
+* среднего радиуса опухоли и средней площади;
+* среднего периметра;
+* средней симметричности.
+
+Постройте график (или графики, если моделей несколько), на котором отразите регрессионную прямую, и прокомментируйте свои находки.
+
+Гипотезы:
+
+* площадь зависит от радиуса квадратично (S = pi*R^2): применим полиномиальную регрессию 2-го порядка;
+* периметр зависит от радиуса линейно (C = 2*pi*R): применим линейную регрессию;
+* симметричность - нет предположений: применим различные модели.
+
+```{r}
+# Создание регрессионных моделей
+# radius_mean ~ area_mean: полиномиальная регрессия порядка 2
+model1 <- lm(radius_mean ~ poly(area_mean, 2), data = wbc_train)
+
+# radius_mean ~ perimeter_mean: линейная регрессия
+model2 <- lm(radius_mean ~ perimeter_mean, data = wbc_train)
+
+# radius_mean ~ symmetry_mean: линейная регрессия
+model3 <- lm(radius_mean ~ symmetry_mean, data = wbc_train)
+# radius_mean ~ symmetry_mean: полиномиальная регрессия порядка 2
+model4 <- lm(radius_mean ~ poly(symmetry_mean, 2), data = wbc_train)
+# radius_mean ~ symmetry_mean: полиномиальная регрессия порядка 3
+model5 <- lm(radius_mean ~ poly(symmetry_mean, 3), data = wbc_train)
+
+# Расчет метрик MAE, MAPE, RMSE, R2 на тестовой выборке
+models <- list(model1, model2, model3, model4, model5)
+model_names <- c("area_mean_poly2", "perimeter_mean_lin", "symmetry_mean_lin", 
+                 "symmetry_mean_poly2", "symmetry_mean_poly3")
+metrics <- data.frame()
+
+for (i in seq_along(models)) {
+  model <- models[[i]]
+  predictions <- predict(model, newdata = wbc_test)
+  actual <- wbc_test$radius_mean
+  
+  mae <- mean(abs(actual - predictions))
+  mape <- mean(abs((actual - predictions) / actual)) * 100
+  rmse <- sqrt(mean((actual - predictions)^2))
+  r2 <- 1 - (sum((actual - predictions)^2) / sum((actual - mean(actual))^2))
+  
+  metrics <- rbind(metrics, data.frame(Model = model_names[i], MAE = mae, MAPE = mape, RMSE = rmse, R2 = r2))
+}
+
+# Отображение результатов и таблицы метрик
+for (i in seq_along(models)) {
+  cat("\nSummary для модели:", model_names[i], "\n")
+  print(summary(models[[i]]))
+}
+
+print(metrics)
+
+# Построение графиков с регрессионными кривыми
+# radius_mean ~ area_mean
+ggplot(wbc_train, aes(x = area_mean, y = radius_mean)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE) + 
+  labs(title = "radius_mean ~ area_mean (полиномиальная регрессия порядка 2)")
+
+# radius_mean ~ perimeter_mean
+ggplot(wbc_train, aes(x = perimeter_mean, y = radius_mean)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) + 
+  labs(title = "radius_mean ~ perimeter_mean (линейная регрессия)")
+
+# radius_mean ~ symmetry_mean для разных моделей
+ggplot(wbc_train, aes(x = symmetry_mean, y = radius_mean)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, aes(color = "линейная")) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, aes(color = "полиномиальная 2-го порядка")) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = FALSE, aes(color = "полиномиальная 3-го порядка")) + 
+  labs(title = "radius_mean ~ symmetry_mean (разные модели)") + 
+  scale_color_manual(name = "Модель", values = c("линейная" = "blue", "полиномиальная 2-го порядка" = "red", "полиномиальная 3-го порядка" = "green"))
+```
+Выводы:
+
+Исходя из крайне высоких значений коэффициента детерминации для моделей radius_mean ~ area_mean и radius_mean ~ perimeter_mean (0.997 и 0.995 соотв.) и результатов визуализации, гипотезы о квадратичной зависимости площади от радиуса и линейной зависимости периметра от радиуса можно считать подтверждёнными.
+
+Что касается средней симметричности - ни одна из моделей (линейная, полиномиальная 2-го порядка, полиномиальная 3-го порядка) не показала хоть сколь-нибудь приемлемого результата. Из визуализации очевидно, что используя только среднюю симметричность невозможно предсказать радиус - требуются дополнительные предикторы.
+
+## Задание 2
+
+Пусть колонка с диагнозом принимает следующие значения: злокачественная опухоль (M) — 1, а доброкачественная (B) — 0. Постройте модель (или несколько моделей), которая прогнозировала бы вероятность возникновения злокачественной опухоли:
+
+* от среднего радиуса;
+* средней площади;
+* средней текстуры.
+
+Постройте графики. Создайте модель, которая бы прогнозировала вероятность возникновения злокачественной опухоли от всех трех перечисленных факторов.
+
+Построим модели для прогнозирования вероятности возникновения злокачественной опухоли от перечисленных трёх факторов по отдельности
+
+```{r}
+# Построение моделей логистической регрессии
+model1 <- glm(diagnosis ~ radius_mean, data = wbc_train, family = "binomial")
+model2 <- glm(diagnosis ~ area_mean, data = wbc_train, family = "binomial")
+model3 <- glm(diagnosis ~ texture_mean, data = wbc_train, family = "binomial")
+
+# Рассчет метрик F1 и AUC-ROC
+models <- list(model1, model2, model3)
+model_names <- c("radius_mean", "area_mean", "texture_mean")
+metrics <- data.frame()
+
+for (i in seq_along(models)) {
+  model <- models[[i]]
+  predictions <- predict(model, newdata = wbc_test, type = "response")
+  pred_class <- ifelse(predictions > 0.5, 1, 0)
+  
+  # F1
+  precision <- sum(wbc_test$diagnosis == 1 & pred_class == 1) / sum(pred_class == 1)
+  recall <- sum(wbc_test$diagnosis == 1 & pred_class == 1) / sum(wbc_test$diagnosis == 1)
+  f1 <- 2 * precision * recall / (precision + recall)
+  
+  # AUC-ROC
+  pred <- prediction(predictions, wbc_test$diagnosis)
+  perf <- performance(pred, measure = "auc")
+  auc <- perf@y.values[[1]]
+  
+  metrics <- rbind(metrics, data.frame(Model = model_names[i], F1 = f1, AUC_ROC = auc))
+}
+
+# Отображение результатов и таблицы метрик
+for (i in seq_along(models)) {
+  cat("\nSummary для модели:", model_names[i], "\n")
+  print(summary(models[[i]]))
+}
+
+print(metrics)
+
+# Построение ROC-кривых
+pred1 <- prediction(predict(model1, newdata = wbc_test, type = "response"), wbc_test$diagnosis)
+perf1 <- performance(pred1, measure = "tpr", x.measure = "fpr")
+
+pred2 <- prediction(predict(model2, newdata = wbc_test, type = "response"), wbc_test$diagnosis)
+perf2 <- performance(pred2, measure = "tpr", x.measure = "fpr")
+
+pred3 <- prediction(predict(model3, newdata = wbc_test, type = "response"), wbc_test$diagnosis)
+perf3 <- performance(pred3, measure = "tpr", x.measure = "fpr")
+
+plot(perf1, col = "blue", main = "ROC-кривые")
+plot(perf2, col = "red", add = TRUE)
+plot(perf3, col = "green", add = TRUE)
+legend("bottomright", legend = c("radius_mean", "area_mean", "texture_mean"), 
+       col = c("blue", "red", "green"), lty = 1)
+
+# 
+ggplot(wbc, aes(x = radius_mean, y = diagnosis)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE, color = "blue") +
+  theme_minimal()
+
+ggplot(wbc, aes(x = area_mean, y = diagnosis)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE, color = "darkgreen") +
+  theme_minimal()
+
+ggplot(wbc, aes(x = texture_mean, y = diagnosis)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE, color = "red") +
+  theme_minimal()
+```
+
+Выводы:
+
+Все три фактора (средний радиус, средняя площадь, средняя текстура) по отдельности статистически значимо влияют на вероятность возникловения злокачественной опухоли. Лучшая модель - radius_mean демонстрирует очень хорошие результаты: F1 = 0.82, ROC-AUC = 0.92. Худшая - texture_mean: F1 = 0.36, ROC-AUC = 0.85. Значение метрики F1 существенно хуже.
+
+Построим модоль для прогнозирования вероятности возникновения злокачественной опухоли от всех трех перечисленных факторов.
+В этом случае возникнет мультиколлинеарность т.к. area_mean и radius_mean сильно коррелируют.
+Будем использовать модель LogitBoost - она более устойчива к мультиколлинеарности по сравнению с традиционными линейными моделями, такими как логистическая регрессия. Тем не менее, возможна нестабильность важности признаков.
+
+```{r}
+# Преобразование diagnosis в фактор (требование glmboost из пакета mboost)
+wbc$diagnosis <- factor(wbc$diagnosis, levels = c(0, 1))
+wbc_train$diagnosis <- factor(wbc_train$diagnosis, levels = c(0, 1))
+wbc_test$diagnosis <- factor(wbc_test$diagnosis, levels = c(0, 1))
+
+# Построение модели logitboost
+model <- glmboost(diagnosis ~ radius_mean + area_mean + texture_mean, data = wbc_train, family = Binomial())
+
+# Summary модели
+summary(model)
+
+# Рассчет метрик F1 и AUC-ROC
+predictions <- predict(model, newdata = wbc_test, type = "response")
+pred_class <- ifelse(predictions > 0.5, 1, 0)
+
+# F1
+precision <- sum(wbc_test$diagnosis == 1 & pred_class == 1) / sum(pred_class == 1)
+recall <- sum(wbc_test$diagnosis == 1 & pred_class == 1) / sum(wbc_test$diagnosis == 1)
+f1 <- 2 * precision * recall / (precision + recall)
+
+# AUC-ROC
+pred <- prediction(predictions, wbc_test$diagnosis)
+perf <- performance(pred, measure = "auc")
+auc <- perf@y.values[[1]]
+
+# Таблица с метриками
+metrics <- data.frame(Model = "logitboost", F1 = f1, AUC_ROC = auc)
+print(metrics)
+
+# Построение ROC-кривой
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+plot(perf, main = "ROC-кривая для logitboost")
+```
+
+Выводы:
+
+Модель LogitBoost, использующая все три признака (средний радиус, средняя площадь, средняя текстура) показала такой же результат по метрике F1 = 0.82 и несколько лучший результат по метрике AUC-ROC = 0.94.
+
+## Задание 3
+
+Рассчитайте выборку для гипотезы equality для следующего исследования. Мы хотим сравнить новую терапию инфекции, присоединяющейся в больничных условиях у пациентов с ожогами, с золотым стандартом, основываясь на данных, анализируемых с помощью регрессии Кокса. Пусть отношение рисков «золотой стандарт / новая терапия», hazard ratio, HR = 2. Мы предполагаем, что 80% пациентов (d = 0,8) могут столкнуться с этим заболеванием. Соотношения групп терапии равны (p1 = p2 = 0,5).
+
+Воспользуйтесь следующими формулами:
+
+n_1=n_2=(\frac{Z}{2}+Z)^{2}In(HR)^2p_1p_2d
+
+n=n_1+n_2
+
+```{r}
+
+# Заданные параметры
+HR <- 2
+d <- 0.8
+p1 <- 0.5
+p2 <- 0.5
+alpha <- 0.05
+
+# Функция для расчета размера выборки
+cox_sample_size_original <- function(HR, d, p1, p2, alpha = 0.05) {
+  # Квантили нормального распределения
+  z_alpha <- qnorm(1 - alpha / 2)
+
+    # Расчет размера выборки в каждой группе
+  n <- (z_alpha/2 + z_alpha)^2 * (log(HR)^2 * p1 * p2 * d)
+  n <- ceiling(n) # Округление до ближайшего целого числа в большую сторону
+  
+  # Общий размер выборки
+  total_n <- n * 2
+  
+  return(list(n_per_group = n, total_n = total_n))
+}
+
+result <- cox_sample_size_original(HR, d, p1, p2, alpha = alpha)
+
+# Вывод результатов
+print(paste("Размер выборки в каждой группе:", result$n_per_group))
+print(paste("Общий размер выборки:", result$total_n))
+```
+
+Возможно, в формуле ошибка и пропущен знак деления:
+
+```{r}
+
+# Функция для расчета размера выборки
+cox_sample_size_corrected <- function(HR, d, p1, p2, alpha = 0.05) {
+  # Квантили нормального распределения
+  z_alpha <- qnorm(1 - alpha / 2)
+
+    # Расчет размера выборки в каждой группе
+  n <- (z_alpha/2 + z_alpha)^2 / (log(HR)^2 * p1 * p2 * d)
+  n <- ceiling(n) # Округление до ближайшего целого числа в большую сторону
+  
+  # Общий размер выборки
+  total_n <- n * 2
+  
+  return(list(n_per_group = n, total_n = total_n))
+}
+
+result <- cox_sample_size_corrected(HR, d, p1, p2, alpha = alpha)
+
+# Вывод результатов
+print(paste("Размер выборки в каждой группе:", result$n_per_group))
+print(paste("Общий размер выборки:", result$total_n))
+
+```
+
+Сравним результат, используя формулу, учитывающую мощность (1−β). Примем мощность = 0.8.
+
+```{r}
+# Функция для расчета размера выборки
+cox_sample_size_power <- function(HR, d, p1, p2, alpha = 0.05, power = 0.8) {
+  # Квантили нормального распределения
+  z_alpha <- qnorm(1 - alpha / 2)
+  z_beta <- qnorm(power)
+  
+  # Расчет размера выборки в каждой группе
+  n <- (z_alpha + z_beta)^2 / (log(HR)^2 * p1 * p2 * d)
+  n <- ceiling(n) # Округление до ближайшего целого числа в большую сторону
+  
+  # Общий размер выборки
+  total_n <- n * 2
+  
+  return(list(n_per_group = n, total_n = total_n))
+}
+
+power <- 0.8
+
+result <- cox_sample_size_power(HR, d, p1, p2, alpha = alpha, power = power)
+
+# Вывод результатов
+print(paste("Размер выборки в каждой группе:", result$n_per_group))
+print(paste("Общий размер выборки:", result$total_n))
+```
+
+Также рассчитаем результат, используя функцию ssizeCT.default из пакета powerSurvEpi:
+
+```{r}
+# Используем функцию ssizeCT.default из пакета powerSurvEpi
+n <- ssizeCT.default(
+  power = power,
+  k = p1/p2,    
+  pC = d,   
+  pE = d/HR,
+  RR = HR, 
+  alpha = alpha
+)
+
+# Вывод результатов
+print(paste("Размер выборки в каждой группе:", ceiling(n[['nE']])))
+print(paste("Общий размер выборки:", ceiling(n[['nE']] + n[['nC']])))
+```
+
+
+
