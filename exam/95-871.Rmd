@@ -32,6 +32,7 @@ library(broom)
 library(stats)
 library(lmtest)
 library(ResourceSelection)
+library(pROC)
 
 # загрузка датасета
 kdd_raw <- read.csv("kidney_disease_dataset.csv")
@@ -452,11 +453,48 @@ print(tidy_model)
 vif_values <- vif(logistic_model)
 print(vif_values)
 # значения VIF < 5 - мультиколлинеарности нет
+# VIF < 5 - слабая мультиколлинеарность
+# VIF > 10 - сильная мультиколлинеарность
+
+# диагностические графики
+par(mfrow = c(2, 2))
+crPlots(logistic_model)
 
 # соответствие модели данным (goodness-of-fit) - тест Хосмера–Лемешова
 hoslem.test <- hoslem.test(logistic_model$y, fitted(logistic_model))
 print(hoslem.test)
 # p-value > 0.05 - модель хорошо соответствует данным
+```
+
+```{r}
+# Построение ROC-кривой
+predicted_probabilities <- predict(logistic_model, type = "response")
+roc_obj <- roc(
+  response = kdd$Anemia..yes.no.,
+  predictor = predicted_probabilities,
+  levels = c("no", "yes")
+)
+auc_value <- auc(roc_obj)
+plot(roc_obj, 
+     main = paste0("ROC-кривая (AUC = ", round(auc_value, 3), ")"),
+     col = "blue", lwd = 2)
+
+# график зависимости вероятности анемии от уровня CRP
+new_data <- with(kdd, data.frame(
+  C.reactive.protein..CRP..level = seq(min(C.reactive.protein..CRP..level , na.rm = TRUE),
+                               max(C.reactive.protein..CRP..level, na.rm = TRUE),
+                               length.out = 100),
+  Estimated.Glomerular.Filtration.Rate..eGFR. = median(Estimated.Glomerular.Filtration.Rate..eGFR., na.rm = TRUE),
+  Hemoglobin.level..gms. = median(Hemoglobin.level..gms., na.rm = TRUE)
+))
+new_data$prob <- predict(logistic_model, newdata = new_data, type = "response")
+ggplot(new_data, aes(x = C.reactive.protein..CRP..level, y = prob)) +
+  geom_line(size = 1, color = "steelblue") +
+  labs(title = "Вероятность анемии в зависимости от уровня CRP",
+       x = "Уровень CRP",
+       y = "Вероятность анемии") +
+  theme_minimal()
+# Интерпретация: чем выше уровень воспаления, тем больше риск анемии
 
 ```
 
