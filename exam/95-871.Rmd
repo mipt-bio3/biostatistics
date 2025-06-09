@@ -1,0 +1,469 @@
+---
+title: "Биостатистика. Экзамен"
+author: "95-871"
+date: "2025-06-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(tibble.width = Inf) # отображать все колонки
+```
+
+# Задание 1 + Задание 2
+
+Проведите разведывательный анализ данных, оценив входящие в датасет переменные. Выберите из них одну количественную и одну качественную переменные. При этом качественная переменная должна содержать не менее трех уровней.
+
+Оцените характер распределения количественной переменной и рассчитайте ключевые параметры описательной статистики, наиболее корректно представляющие эти данные (с учетом типа распределения). Разделите переменную, содержащую возраст пациента в годах, на возрастные группы по 25 лет (0–24, 25–49 и т. д.). Для качественной переменной рассчитайте параметры описательной статистики с учетом разделения на возрастные группы.
+
+Постройте необходимые графики для визуализации проверки характера распределения, а также ключевых параметров описательной статистики, для наиболее полного представления данных по выбранным переменным. Интерпретируйте полученные результаты.
+
+```{r}
+
+library(dplyr)
+library(skimr)
+library(corrplot)
+library(ggplot2)
+library(patchwork)
+library(rstatix)
+library(car)
+library(FSA)
+library(broom)
+library(stats)
+library(lmtest)
+library(ResourceSelection)
+
+# загрузка датасета
+kdd_raw <- read.csv("kidney_disease_dataset.csv")
+glimpse(kdd_raw)
+
+# преобразуем строковые переменные в факторы
+kdd <- kdd_raw %>%
+  mutate_if(is.character, as.factor)
+
+# упорядочим факторы
+target_levels <- c("No_Disease", "Low_Risk", "Moderate_Risk", "High_Risk", "Severe_Disease")
+pa_levels <- c("low", "moderate", "high")
+kdd <- kdd %>%
+  mutate(Target = factor(Target, levels = target_levels),
+         Physical.activity.level = factor(Physical.activity.level, levels = pa_levels))
+
+# разведочный анализ данных
+
+# обзор
+skim(kdd)
+
+# числовые переменные
+num_vars <- kdd %>% select(where(is.numeric)) %>% names()
+num_plots <- list()
+for (var in num_vars) {
+  p <- ggplot(kdd, aes(x = !!sym(var))) +
+    geom_histogram(bins = 15, fill = "steelblue") +
+    labs(title = var) +
+    theme_minimal()
+  
+  num_plots <- append(num_plots, list(p))
+}
+
+for (i in seq(1, length(num_plots), by = 4)) {
+  print(
+    wrap_plots(num_plots[i:min(i + 3, length(num_plots))], ncol = 2)
+  )
+}
+
+# тепловая карта корреляций
+correlation_matrix <- cor(kdd %>% select(where(is.numeric)))
+corrplot(correlation_matrix, method = "color", tl.pos = "n")
+
+# категориальные переменные
+target_levels <- levels(kdd$Target)
+color_palette <- c(
+  "No_Disease" = "#e0f4ff",
+  "Low_Risk" = "#b3e6ff",
+  "Moderate_Risk" = "#66ccff",
+  "High_Risk" = "#3399ff",
+  "Severe_Disease" = "#0000ff"
+)
+
+cat_vars <- kdd %>% select(where(is.factor)) %>% names()
+cat_plots <- list()
+for (var in cat_vars) {
+  p <- ggplot(kdd, aes(x = !!sym(var), fill = Target)) +
+    geom_bar(position = "dodge") +
+    scale_fill_manual(
+      name = "Risk Group",
+      values = color_palette,
+      limits = target_levels
+    ) +
+    labs(title = var) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  cat_plots <- append(cat_plots, list(p))
+}
+
+for (i in seq(1, length(cat_plots), by = 4)) {
+  print(
+    wrap_plots(cat_plots[i:min(i + 3, length(cat_plots))], ncol = 2)
+  )
+}
+
+# cывороточный креатинин
+ggplot(kdd, aes(x = Serum.creatinine..mg.dl., fill = Target)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Сывороточный креатинин по группам")
+
+# eGFR
+ggplot(kdd, aes(x = Estimated.Glomerular.Filtration.Rate..eGFR., fill = Target)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "eGFR по группам")
+
+```
+
+По результатам разведочного анализа можно сделать вывод, что это синтетический датасет: пропуски отсутствуют, числовые переменные имеют равномерные распределения, абсолютно не коррелируют, а ключевые показатели (например, сывороточный креатинин) имеют одинаковые распределения вне зависимости от значения целевой переменной, что не несёт смысла с медицинской точки зрения.
+
+Дальнейшие сравнения, вероятно, не покажут значимых отличий.
+
+Для дальнейших шагов выберем числовую переменную `Serum.creatinine..mg.dl.` и категориальную переменную `Physical.activity.level`.
+
+```{r}
+
+# Serum.creatinine..mg.dl.
+
+# визуализация распределения
+mean_creatinine <- mean(kdd$Serum.creatinine..mg.dl., na.rm = TRUE)
+
+hist_data <- ggplot_build(
+  ggplot(kdd, aes(x = Serum.creatinine..mg.dl.)) +
+    geom_histogram(bins = 30)
+)$data[[1]]
+
+mean_count <- mean(hist_data$count)
+
+ggplot(kdd, aes(x = Serum.creatinine..mg.dl.)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black", alpha = 0.8, name = "count") +
+  geom_vline(xintercept = mean_creatinine, color = "red", linetype = "dashed", size = 1) +
+  geom_hline(yintercept = mean_count, color = "blue", linetype = "dashed", size = 1) +
+  labs(
+    title = "Распределение уровня сывороточного креатинина",
+    x = "Сывороточный креатинин (мг/дл)",
+    y = "Частота"
+  ) +
+  annotate("text", x = mean_creatinine, y = Inf,
+           label = paste("Ср. креатинин =", round(mean_creatinine, 2)),
+           vjust = 1.5, hjust = 1.1, color = "red", fontface = "bold") +
+  annotate("text", x = Inf, y = mean_count,
+           label = paste("Ср. частота =", round(mean_count, 0)),
+           hjust = 1.1, vjust = 0, color = "blue", fontface = "bold") +
+  theme_minimal()
+
+ggplot(kdd, aes(y = Serum.creatinine..mg.dl.)) +
+  geom_boxplot(notch = TRUE, fill = "steelblue") +
+  labs(title = "Serum.creatinine..mg.dl.")
+
+# ключевые параметры описательной статистики
+stats <- kdd %>%
+  summarise(
+    Min = min(Serum.creatinine..mg.dl., na.rm = TRUE),
+    Q1 = quantile(Serum.creatinine..mg.dl., 0.25, na.rm = TRUE),
+    Median = median(Serum.creatinine..mg.dl., na.rm = TRUE),
+    Mean = mean(Serum.creatinine..mg.dl., na.rm = TRUE),
+    Q3 = quantile(Serum.creatinine..mg.dl., 0.75, na.rm = TRUE),
+    Max = max(Serum.creatinine..mg.dl., na.rm = TRUE),
+    IQR = IQR(Serum.creatinine..mg.dl., na.rm = TRUE),
+    Range = Max - Min
+  )
+
+print(stats)
+
+# добавляем новую категориальную переменную с возрастными группами
+kdd <- kdd %>%
+  mutate(
+    Age_Group = case_when(
+      Age.of.the.patient >= 0 & Age.of.the.patient < 25 ~ "0–24",
+      Age.of.the.patient >= 25 & Age.of.the.patient < 50 ~ "25–49",
+      Age.of.the.patient >= 50 & Age.of.the.patient < 75 ~ "50–74",
+      Age.of.the.patient >= 75 ~ "75+"
+    ),
+    # преобразуем в фактор с правильным порядком
+    Age_Group = factor(Age_Group, levels = c("0–24", "25–49", "50–74", "75+"))
+  )
+
+# выводим результат
+table(kdd$Age_Group)
+
+# визуализация
+ggplot(kdd, aes(x = Age_Group)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Распределение пациентов по возрастным группам",
+       x = "Возрастная группа",
+       y = "Количество пациентов") +
+  theme_minimal()
+
+# Serum.creatinine..mg.dl.: среднее и медиана по возрастным группам
+kdd %>%
+  group_by(Age_Group) %>%
+  summarise(
+    Mean_Creatinine = mean(Serum.creatinine..mg.dl., na.rm = TRUE),
+    Median_Creatinine = median(Serum.creatinine..mg.dl., na.rm = TRUE)
+  )
+
+# Physical.activity.level
+
+table(kdd$Physical.activity.level)
+
+# частоты по возрастным группам
+age_activity_counts <- kdd %>%
+  group_by(Age_Group, Physical.activity.level) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  group_by(Age_Group) %>%
+  mutate(
+    Total = sum(Count),
+    Relative_Freq = round(Count / Total, 3)
+  )
+
+print(age_activity_counts)
+
+# визуализация
+ggplot(age_activity_counts, aes(x = Age_Group, y = Relative_Freq, fill = Physical.activity.level)) +
+  geom_bar(stat = "identity", position = "fill") +
+  labs(title = "Доля уровня физической активности по возрастным группам",
+       x = "Возрастная группа",
+       y = "Доля",
+       fill = "Уровень активности") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme_minimal()
+
+# определение моды 
+mode_activity <- kdd %>%
+  group_by(Age_Group) %>%
+  summarise(
+    Mode = names(sort(table(Physical.activity.level), decreasing = TRUE))[1],
+    Mode_Count = max(table(Physical.activity.level))
+  )
+
+print(mode_activity)
+
+```
+
+
+
+# Задание 3
+
+С учетом проведенных ранее процедур, выберите соответствующий статистический тест для попарного сравнения количественной переменной, разделенной на группы качественной переменной. 
+
+Выберите дополнительную качественную переменную и проведите сходную процедуру попарных сравнений. Используйте post-hoc тесты, поправки на множественные сравнения и графическую визуализацию результатов и проверки допущений тестов, где это уместно. Интерпретируйте полученные результаты.
+
+```{r}
+
+# Shapiro-Wilk: проверка нормальности распределений
+set.seed(42)
+kdd_sampled <- kdd %>%
+  group_by(Physical.activity.level) %>%
+  sample_n(size = 5000, replace = FALSE)  # 5000 - макс. размер выборки для shapiro_test
+kdd_sampled %>%
+  group_by(Physical.activity.level) %>%
+  shapiro_test(Serum.creatinine..mg.dl.)
+
+# Levene’s test: проверка равенства дисперсий
+leveneTest(Serum.creatinine..mg.dl. ~ Physical.activity.level, data = kdd)
+
+# Kruskal-Wallis
+kruskal.test(Serum.creatinine..mg.dl. ~ Physical.activity.level, data = kdd)
+
+# Попарные сравнения (post-hoc) с поправкой Бонферрони
+dunnTest(Serum.creatinine..mg.dl. ~ Physical.activity.level, data = kdd, method = "bonferroni")
+
+# boxplot
+ggplot(kdd, aes(x = Physical.activity.level, y = Serum.creatinine..mg.dl., fill = Physical.activity.level)) +
+  geom_boxplot(notch = TRUE) +
+  labs(
+    title = "Уровень креатинина по уровню физической активности",
+    x = "Уровнь физической активности",
+    y = "Уровень креатинина (мг/дл)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+Интерпретация:
+
+1. Проверка нормальности (Shapiro-Wilk): как и ожидалось, все три группы (low, moderate, high) имеют значительно ненормальное распределение (p < 0.001)
+2. Проверка равенства дисперсий (Levene’s test): дисперсии не различаются значимо между группами.
+3. Сравнение (Kruskal-Wallis test): статистически значимых различий между уровнями физической активности по уровню креатинина не выявлено.
+4. Попарные сравнения (Dunn’s test с поправкой Бонферрони): все парные сравнения также не показали значимых различий.
+         
+**Вывод:**
+
+Несмотря на то, что распределение уровня сывороточного креатинина не является нормальным и мы использовали непараметрический подход, статистически значимых различий между группами по уровню физической активности обнаружено не было. 
+
+Проведём аналогичное сравнение для групп по целевой переменной.
+
+```{r}
+
+# Shapiro-Wilk: проверка нормальности распределений
+set.seed(42)
+kdd_sampled_smoking <- kdd %>%
+  group_by(Target) %>%
+  sample_n(size = min(5000, n()), replace = FALSE)  # 5000 - макс. размер выборки для shapiro_test
+kdd_sampled_smoking %>%
+  group_by(Target) %>%
+  shapiro_test(Serum.creatinine..mg.dl.)
+
+# Levene’s test: проверка равенства дисперсий
+leveneTest(Serum.creatinine..mg.dl. ~ Target, data = kdd)
+
+# Kruskal-Wallis
+kruskal.test(Serum.creatinine..mg.dl. ~ Target, data = kdd)
+
+# Попарные сравнения (post-hoc)
+dunnTest(Serum.creatinine..mg.dl. ~ Target, data = kdd, method = "bonferroni")
+
+# boxplot
+ggplot(kdd, aes(x = Target, y = Serum.creatinine..mg.dl., fill = Target)) +
+  geom_boxplot(notch = TRUE) +  
+   scale_fill_manual(
+      name = "Risk Group",
+      values = color_palette,
+      limits = target_levels
+    ) +
+  labs(
+    title = "Сравнение уровня сывороточного креатинина по группа риска (Target)",
+    x = "Группа",
+    y = "Уровень креатинина (мг/дл)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+Интерпретация:
+
+1. Проверка нормальности (Shapiro-Wilk): все группы имеют значительно ненормальное распределение (p < 0.001)
+2. Проверка равенства дисперсий (Levene’s test): дисперсии не различаются значимо между группами.
+3. Сравнение (Kruskal-Wallis test): статистически значимых различий между группам по уровню креатинина не выявлено.
+4. Попарные сравнения (Dunn’s test с поправкой Бонферрони): ни одно из парных сравнений также не показало значимых различий.
+         
+**Вывод:**
+
+Статистически значимых различий между группами риска по уровню креатинина обнаружено не было. 
+
+# Задание 4
+
+Для количественной переменной (выбранной ранее или новой) постройте модель линейной регрессии, включающую не менее трех предикторов, потенциально имеющих биологический смысл в виде причинно-следственных связей. 
+
+Проверьте необходимые допущения метода с использованием количественных тестов и графической визуализации. Интерпретируйте полученные результаты. Постройте необходимую графическую визуализацию для их презентации.
+
+```{r}
+
+# построение модели
+creatinine_model <- lm(
+  formula = Serum.creatinine..mg.dl. ~ Body.Mass.Index..BMI. + Age.of.the.patient + Estimated.Glomerular.Filtration.Rate..eGFR.,
+  data = kdd
+)
+
+# вывод результатов
+summary(creatinine_model)
+
+tidy_model <- tidy(creatinine_model)
+print(tidy_model)
+
+# диагностические графики
+par(mfrow = c(2, 2))
+plot(creatinine_model)
+
+# оцениваем качество модели
+glance(creatinine_model) %>%
+  select(r.squared, adj.r.squared, sigma, AIC, BIC)
+
+# проверка мультиколлинеарности - рассчитываем VIF
+vif_values <- vif(creatinine_model)
+
+# тест на нормальность остатков (Shapiro-Wilk)
+residuals_model <- residuals(creatinine_model)
+# если остатков больше 5000 - делаем случайную выборку
+if (length(residuals_model) > 5000) {
+  set.seed(42)  # Воспроизводимость
+  residuals_sample <- sample(residuals_model, 5000)
+} else {
+  residuals_sample <- residuals_model
+}
+crea_shapiro <- shapiro.test(residuals_sample)
+
+# тест на гомоскедастичность (Breusch-Pagan Test)
+crea_bp <- bptest(creatinine_model)
+
+# автокорреляция остатков (Durbin-Watson Test)
+crea_dw <- dwtest(creatinine_model)
+
+# таблица с результатами тестов
+regression_assumptions <- tibble::tibble(
+  Assumption = c("Нормальность остатков", "Гомоскедастичность", "Мультиколлинеарность", "Автокорреляция"),
+  Test = c("Shapiro-Wilk", "Breusch-Pagan", "VIF", "Durbin-Watson"),
+  p_value = c(
+    crea_shapiro$p.value,
+    crea_bp$p.value,
+    NA_real_,
+    crea_dw$p.value
+  ),
+  VIF_Median = c(NA_real_, NA_real_, median(vif_values), NA_real_),
+  Interpretation = case_when(
+    p_value < 0.05 & Assumption == "Нормальность остатков" ~ "Остатки не нормальны",
+    p_value >= 0.05 & Assumption == "Нормальность остатков" ~ "Остатки нормальны",
+    p_value < 0.05 & Assumption == "Гомоскедастичность" ~ "Гетероскедастичность",
+    p_value >= 0.05 & Assumption == "Гомоскедастичность" ~ "Гомоскедастичность",
+    VIF_Median > 10 & Assumption == "Мультиколлинеарность" ~ "Сильная",
+    VIF_Median > 5 & Assumption == "Мультиколлинеарность" ~ "Умеренная",
+    TRUE ~ "Незначительная"
+  )
+)
+
+print(regression_assumptions)
+```
+
+**Интерпретация:** на данном датасете значения выглядят совершенно случайными и независимыми, поэтому выше реализован код для автоматической интерпретации результатов (основных допущений модели).
+
+# Задание 5
+
+Для качественной бинарной переменной (выбранной ранее или новой) постройте модель логистической регрессии, включающую не менее трех предикторов, потенциально имеющих биологический смысл в виде причинно-следственных связей. 
+
+Проверьте необходимые допущения метода с использованием количественных тестов и графической визуализации. Интерпретируйте полученные результаты. Постройте необходимую графическую визуализацию для их презентации.
+
+```{r}
+
+# построение модели
+logistic_model <- glm(
+  formula = Anemia..yes.no. ~ Hemoglobin.level..gms. + Estimated.Glomerular.Filtration.Rate..eGFR. + C.reactive.protein..CRP..level,
+  data = kdd,
+  family = binomial
+)
+
+# вывод результатов
+summary(logistic_model)
+
+tidy_model <- tidy(logistic_model, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value)
+
+print(tidy_model)
+# оценка > 1 - увеличивает вероятность "yes"
+# оценка < 1 - снижает вероятность "yes"
+# p-value < 0.05 - статистически значимый эффект
+
+vif_values <- vif(logistic_model)
+print(vif_values)
+# значения VIF < 5 - мультиколлинеарности нет
+
+# соответствие модели данным (goodness-of-fit) - тест Хосмера–Лемешова
+hoslem.test <- hoslem.test(logistic_model$y, fitted(logistic_model))
+print(hoslem.test)
+# p-value > 0.05 - модель хорошо соответствует данным
+
+```
+
+Была выбрана переменная Anemia..yes.no. и предикторы Hemoglobin.level..gms.,Estimated.Glomerular.Filtration.Rate..eGFR., C.reactive.protein..CRP..level т.к. анемия  часто встречается у пациентов с хроническими заболеваниями почек и имеет биологическую связь с уровнем гемоглобина, функцией почек и воспалением.
+
+**Интерпретация:** на данном датасете значения выглядят совершенно случайными и независимыми, поэтому критерии для интерпретации результатов указаны в коде в виде комментариев.
+
+# Вывод
+
+К сожалению, датасет не содержит клинически значимых данных. Возможно, это связано с ошибкой в предобработке данных. В таком случае, данный код может быть применён к обновлённым данным.
